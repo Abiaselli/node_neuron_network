@@ -34,9 +34,11 @@ To load a dataset, have the files you want to use alone in a folder, and press "
 
 Then you can press start training after adjusting your parameters and loading your model and tokenizer. Note: when pressing stop training, it will have a second dialog box pop up when it actually stops after the current batch is completed so you can save a model if you stop mid training.
 
-You can also create a tokenizer from a vocab.json, I will also include a program to convert text files to tokenizers if you would like to try this on your own. I am particularly intrerested in trying to develop a model with a systematically developed tokenizer vocabulary, as most are pretty random and all over the place, but my first attempt to do this was with a character mapped tokenizer and it seemed xtremely limited in what it could do, I haven't tried it with the cascading node neural network yet. 
+You can also create a tokenizer from a vocab.json, I also included a program to convert text files to tokenizers if you would like to try this on your own. I am particularly intrerested in trying to develop a model with a systematically developed tokenizer vocabulary, as most are pretty random and all over the place, but my first attempt to do this was with a character mapped tokenizer and it seemed xtremely limited in what it could do, I haven't tried it with the cascading node neural network yet. 
 
-I hope to add on to this and make incremental improvements over time. I should note this is not related to the NodeNet named in literature, so we will stick with Node Neuron Network for now.
+An inference program is included for testing. Note: if you edit the trainoing or inference program, make sure you are aware the logic of the transformers output a tuple of logits, attention_weights (as it is requried to be able to pass attention between nodes) so make sure that is taken into account if you alter the program
+
+I hope to add on to this and make incremental improvements over time. Also, this is not related to the NodeNet named in literature, so we will stick with Node Neuron Network or NNN, even though Nodenet is a better name.
 
 Citations:
 

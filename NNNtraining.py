@@ -1145,7 +1145,7 @@ class UnifiedTransformerGUI:
                 json.dump(config, f)
 
             # Save the model state dictionary
-            model_path = os.path.join(save_directory, 'matmul_free_lm.pth')
+            model_path = os.path.join(save_directory, 'cascade_matmul_free_lm.pth')
             torch.save(self.model.state_dict(), model_path)
 
             # Save the tokenizer

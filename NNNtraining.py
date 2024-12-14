@@ -679,7 +679,7 @@ class UnifiedTransformerGUI:
 
     def calculate_learning_rate(self, total_params):
         total_params = max(total_params, 1)  # Prevent division by zero
-        lr = 17.38 * (total_params ** -0.424)
+        lr = self.learning_rate.get() #17.38 * (total_params ** -0.424) For extremely small models or full Mat-Mul Free linear pass
         return lr
 
     def select_dataset(self):

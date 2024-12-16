@@ -344,7 +344,7 @@ class MLGRULayer(nn.Module):
         h_t = torch.zeros(batch_size, self.cell.hidden_size, device=x.device)
         outputs = []
         try:
-            for t in range(max_seq_len):
+            for t in range(seq_lengths):
                 x_t = x[:, t, :]
                 o_t, h_t = self.cell(x_t, h_t)
                 outputs.append(o_t.unsqueeze(1))

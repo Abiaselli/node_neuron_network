@@ -1,7 +1,9 @@
-# Node-Neuron Network
+# Node-Neuron Network EXPERIMENTAL V2
 A training platform for node-neuron neural network cascade concept for Mat-mul reduced transformer
 
 Based on my transformer Trainer for Matmul-free or limited implementation
+
+WARNING: this is the un-tested experimental version with standard and matmul-free implementation. i will debugging it in the next few days. This follows a different workflow than the original version.
 
 Hello! This is a training (and inference) program BASED on the Matmul-Free architecture outlined in 
 Scalable MatMul-free Language Modeling
@@ -30,9 +32,17 @@ This is not a perfect recreation of the Mat-mul free architecture as I lack the 
 
 I should note, there are some small bugs due to this being unfinished and numerous revisions during this process. At one point it was abled to use both chunked and unchunked datasets of any type, which I will also upload, but I was not satisfied with the implementation of the architecture.
 
-As it is now, the traning data can be in multiple formats with certain restrictions. .txt files are fine, a parquet or json with text, TEXT, messages will work, as well as one with instruct and output columns which will be concatenated. Or a csv with text columns or instruct/output columns.
+As it is now, the traning data must be in query-target pairs .JSON of this format (like in the smoltalk dataset):
 
-To load a dataset, have the files you want to use alone in a folder, and press "select dataset directory" and select the folder. Press "load dataset" to load it. Then, press "select/create tokenized data" and choose no when asked to use existing tokenized data. Enter a new name for a file. Then, you can press "tokenize data" to laod it (after you laod a tokenizer.) If you use a pre-tokenized file you must still press tokenzie daa to load it.
+[
+{ "content": "Hey!", "role": "user" }, 
+{ "content": "Hello! How can I help you today?", "role": "assistant" },
+etc. 
+}
+
+I will include the parquet to json converter i used to convert them, by selecting only the "messages" column.
+
+To load a dataset, leave "chunked dataset" unchecked, have the .json or .jsons you want to use alone in a folder, and press "select dataset directory" and select the folder. Press "load dataset" to load it. Then, check the "use chunked datset" checkbox, and press "select/create tokenized data" and choose no when asked to use existing tokenized data. Create a new folder for the chunked dataset files, and select that folder. Then, you have to press "load dataset" and click on the folder with the chunked file. Then you can press start training after adjusting your parameters and loading your model and tokenizer. Note: when pressing stop training, it will have a second dialog box pop up when it actually stops after the current batch is completed so you can save a model if you stop mid training.
 
 Then you can press start training after adjusting your parameters and loading your model and tokenizer. Note: when pressing stop training, it will have a second dialog box pop up when it actually stops after the current batch is completed so you can save a model if you stop mid training.
 

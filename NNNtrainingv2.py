@@ -27,6 +27,9 @@ import seaborn as sns
 
 # Print whether CUDA is available
 print(f"CUDA Available: {torch.cuda.is_available()}")
+#debug for cuda
+import os
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 # Global tokenizer variable for multiprocessing
 tokenizer = None
@@ -42,17 +45,6 @@ def log_system_usage():
     logging.info(f"CPU Usage: {cpu_percent}%")
     logging.info(f"RAM Usage: {ram_used:.2f} GB / {ram_total:.2f} GB")
 
-@staticmethod
-def convert_model_if_needed(state_dict):
-            new_state_dict = {}
-            for key, value in state_dict.items():
-                # Handle positional encoding -> rotary embedding conversion
-                if 'pos_encoder' in key:
-                    rotary_key = key.replace('pos_encoder', 'rotary')
-                    new_state_dict[rotary_key] = value
-                else:
-                    new_state_dict[key] = value
-            return new_state_dict
 
 
 def save_checkpoint(model, optimizer, epoch, phase, path):
@@ -172,20 +164,20 @@ class ChunkedDataset(torch.utils.data.Dataset):
 
 #Saved for reference or later implementation as an option
 class MiniTransformerNode(nn.Module):
-    def __init__(self, embed_size, num_heads, num_layers, hidden_size, max_seq_length=128):
+    def __init__(self, vocab_size, embed_size, num_heads, num_layers, hidden_size, max_seq_length):
         super().__init__()
-        self.embedding = nn.Embedding(30000, embed_size)
+        self.embedding = nn.Embedding(vocab_size, embed_size)
         self.pos_encoder = nn.Embedding(max_seq_length, embed_size)
-        
+        self.vocab_size=vocab_size
         encoder_layer = nn.TransformerEncoderLayer(d_model=embed_size, nhead=num_heads, dim_feedforward=hidden_size, batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        self.fc_out = nn.Linear(embed_size, 30000)
+        self.fc_out = nn.Linear(embed_size, vocab_size)
         self.cross_node_attention = nn.MultiheadAttention(embed_size, num_heads, batch_first=True)
 
-    def forward(self, x, prev_node_output=None, src_mask=None, is_final_node=False):
+    def forward(self, x, seq_lengths, prev_node_output=None, src_mask=None, is_final_node=False):
         # Ensure x is within the correct token index range
-        x = torch.clamp(x.long(), min=0, max=29999)
+        x = torch.clamp(x, min=0, max=self.vocab_size - 1)  # Make sure indices are within range
 
         if x.dim() == 2:  
             embeddings = self.embedding(x)  # Shape: (batch_size, seq_length, embed_size)
@@ -205,7 +197,7 @@ class MiniTransformerNode(nn.Module):
 
         # Cross-node attention (global attention) - apply only if there is a previous node
         if prev_node_output is not None:
-            output, attention_weights = self.cross_node_attention(output, prev_node_output, prev_node_output)
+            output, attention_weights = self.cross_node_attention(output, prev_node_output, prev_node_output, attn_mask=src_mask)
         else:
             # Set attention_weights to None if there's no previous node output
             attention_weights = None
@@ -222,42 +214,42 @@ class MiniTransformerNode(nn.Module):
 
 #Standard Node network
 class CascadeTransformer(nn.Module):
-    def __init__(self, num_nodes, embed_size, num_heads, num_layers, hidden_size):
+    def __init__(self, num_nodes, vocab_size, embed_size, num_heads, num_layers, hidden_size, max_seq_length):
         super().__init__()
         self.nodes = nn.ModuleList([
-            MiniTransformerNode(embed_size, num_heads, num_layers, hidden_size) 
+            MiniTransformerNode(vocab_size, embed_size, num_heads, num_layers, hidden_size, max_seq_length) 
             for _ in range(num_nodes)
         ])
         self.num_heads=num_heads
 
     
-    def forward(self, x, mask=None):
+    def forward(self, x, seq_lengths,  mask=None):
         prev_node_output = None
         attention_weights_all_nodes = []  # To store attention weights from all nodes
         for i, node in enumerate(self.nodes):
             is_final_node = (i == len(self.nodes) - 1)
-            x, attention_weights = node(x, prev_node_output=prev_node_output, src_mask=mask, is_final_node=is_final_node)
+            x, attention_weights = node(x, seq_lengths, prev_node_output=prev_node_output, src_mask=mask, is_final_node=is_final_node)
             prev_node_output = x  # Store the current output for use in the next node
             attention_weights_all_nodes.append(attention_weights)  # Append attention weights from each node
         return x, attention_weights_all_nodes
 
 #MatMul-Free Node Network
 class CascadeTransformerMM(nn.Module):
-    def __init__(self, num_nodes, vocab_size, embed_size, hidden_size, num_heads, eps=1e-8):
+    def __init__(self, num_nodes, vocab_size, embed_size, hidden_size, num_heads, max_seq_length, eps=1e-8):
         super().__init__()
         self.nodes = nn.ModuleList([
-            MatMulFreeLanguageModel(vocab_size, embed_size, hidden_size, num_heads, eps) 
+            MatMulFreeLanguageModel(vocab_size, embed_size, hidden_size, num_heads, max_seq_length, eps) 
             for _ in range(num_nodes)
         ])
         self.num_heads=num_heads
         
     
-    def forward(self, x, mask=None):
+    def forward(self, x, seq_lengths, mask=None):
         prev_node_output = None
         attention_weights_all_nodes = []  # To store attention weights from all nodes
         for i, node in enumerate(self.nodes):
             is_final_node = (i == len(self.nodes) - 1)
-            x, attention_weights = node(x, prev_node_output=prev_node_output, src_mask=mask, is_final_node=is_final_node)
+            x, attention_weights = node(x, seq_lengths, prev_node_output=prev_node_output, src_mask=mask, is_final_node=is_final_node)
             prev_node_output = x  # Store the current output for use in the next node
             attention_weights_all_nodes.append(attention_weights)  # Append attention weights from each node
         return x, attention_weights_all_nodes
@@ -488,27 +480,26 @@ class MLGRULayer(nn.Module):
         self.cell = MLGRUCell(embed_size, hidden_size, eps)
         self.hidden_size = hidden_size
             
-    def forward(self, x):
+    def forward(self, x, seq_lengths):
         logging.debug(f"Input to MLGRULayer: {x.shape}")
         logging.debug(f"Output of Attention Layer: {x.shape}")
 
         batch_size, max_seq_len, _ = x.size()
         h_t = torch.zeros(batch_size, self.cell.hidden_size, device=x.device)
         outputs = []
+        try:
+            for t in range(max_seq_len):
+                x_t = x[:, t, :]
+                o_t, h_t = self.cell(x_t, h_t)
+                outputs.append(o_t.unsqueeze(1))
 
-        for t in range(max_seq_len):
-            mask = (max_seq_len > t).float().unsqueeze(1)
-            x_t = x[:, t, :]
-            o_t, h_t = self.cell(x_t, h_t)
-
-            # Add gated copying mechanism
-            copy_gate = torch.sigmoid(self.cell.W_g @ x_t.t()).t()
-            h_t = copy_gate * x_t + (1 - copy_gate) * h_t
-
-            h_t = h_t * mask + h_t.detach() * (1 - mask)
-            outputs.append(o_t.unsqueeze(1) * mask.unsqueeze(2))
+            output = torch.cat(outputs, dim=1)
+        except Exception as e:
+            raise ValueError("Gru kayer failed") 
 
         outputs = torch.cat(outputs, dim=1)
+        logging.debug(f"Shape of outputs after cat: {outputs.shape}")
+
         # Log statistics after MLGRULayer
         if torch.isnan(outputs).any() or torch.isinf(outputs).any():
             logging.error("Outputs from MLGRULayer contain NaN or Inf.")
@@ -567,8 +558,17 @@ class MLGRUCell(nn.Module):
         W_g_ternary = ternarize_weight(W_g)
 
         # MatMul-Free Linear Operations
+        logging.debug(f"Shape of w_f_ternary passed to MMLF: {W_f_ternary.shape}")
+        logging.debug(f"Shape of x_t passed to MMLF: {x_t.shape}")
+
         f_t_linear = MatMulFreeLinearFunction.apply(x_t, W_f_ternary) + self.b_f
+        
+        logging.debug(f"Shape of w_c_ternary passed to MMLF: {W_c_ternary.shape}")
+
         c_t_linear = MatMulFreeLinearFunction.apply(x_t, W_c_ternary) + self.b_c
+        
+        logging.debug(f"Shape of w_g_ternary passed to MMLF: {W_g_ternary.shape}")
+
         g_t_linear = MatMulFreeLinearFunction.apply(x_t, W_g_ternary) + self.b_g
 
         # Activation Functions
@@ -640,15 +640,20 @@ class MatMulFreeGLU(nn.Module):
         W_d_bar = WeightQuantFunction.apply(self.W_d)
 
         # MatMul-Free Linear Operations
+        logging.debug(f"Shape of W_G_bar passed to MMLF: {W_g_bar.shape}")
+        logging.debug(f"Shape of x passed to MMLF: {x.shape}")
 
         g_t = MatMulFreeLinearFunction.apply(x, W_g_bar)+self.b_g
         logging.debug(f"Input to MatMulFreeLinear: mean={g_t.mean().item():.4f}, std={g_t.std().item():.4f}, shape={g_t.shape}")
+        logging.debug(f"Shape of W_u_bar passed to MMLF: {W_u_bar.shape}")
 
         u_t = MatMulFreeLinearFunction.apply(x, W_u_bar)+self.b_u
         logging.debug(f"Input to MatMulFreeLinear: mean={u_t.mean().item():.4f}, std={u_t.std().item():.4f}, shape={u_t.shape}")
 
         p_t = F.silu(g_t) * u_t
         logging.debug(f"Input to MatMulFreeLinear: mean={p_t.mean().item():.4f}, std={p_t.std().item():.4f}, shape={p_t.shape}")
+        logging.debug(f"Shape of W_d_bar passed to MMLF: {W_d_bar.shape}")
+        logging.debug(f"Shape of p_t passed to MMLF: {p_t.shape}")
 
         d_t = MatMulFreeLinearFunction.apply(p_t, W_d_bar)+self.b_d
         logging.debug(f"Input to MatMulFreeLinear: mean={d_t.mean().item():.4f}, std={d_t.std().item():.4f}, shape={d_t.shape}")
@@ -665,15 +670,17 @@ class MatMulFreeGLU(nn.Module):
 
 class MatMulFreeLanguageModel(nn.Module):
     """MatmukFreeLangiuagemodel concept with multihead attention"""
-    def __init__(self, vocab_size, embed_size, hidden_size, seq_length, num_heads=8, eps=1e-5):
+    def __init__(self, vocab_size, embed_size, hidden_size, num_heads, max_seq_length, eps=1e-5):
         super(MatMulFreeLanguageModel, self).__init__()
         self.eps=eps
+        self.seq_length=max_seq_length
         self.embedding = nn.Embedding(vocab_size, embed_size)
         self.cross_node_attention = nn.MultiheadAttention(embed_size, num_heads, batch_first=True)
         self.mlgru_layer = MLGRULayer(embed_size, hidden_size, eps)
         self.glu = MatMulFreeGLU(hidden_size, hidden_size, eps)
         self.output_layer = nn.Linear(hidden_size, vocab_size)
         self.rms_norm = RMSNorm(hidden_size, eps=eps)
+        self.vocab_size=vocab_size
         self.initialize_ternarized_outputs()
         self.initialize_copying_weights()
 
@@ -706,8 +713,9 @@ class MatMulFreeLanguageModel(nn.Module):
         return ternary_tensor
 
 
-    def forward(self, input_ids, prev_node_output=None, src_mask=None, is_final_node=False):
+    def forward(self, input_ids, seq_length, prev_node_output=None, src_mask=None, is_final_node=False):
         logging.debug(f"Input IDs shape: {input_ids.shape}")
+        input_ids = torch.clamp(input_ids, min=0, max=self.vocab_size - 1)  # Make sure indices are within range
 
         # Embedding Layer
         if input_ids.dim() == 2:  
@@ -717,7 +725,7 @@ class MatMulFreeLanguageModel(nn.Module):
         logging.debug(f"X passed to attention: mean={x.mean().item():.4f}, std={x.std().item():.4f}, shape={x.shape}")
 
         # MLGRULayer
-        x = self.mlgru_layer(x)
+        x = self.mlgru_layer(x, seq_length)
         logging.debug(f"X passed to GLU: mean={x.mean().item():.4f}, std={x.std().item():.4f}, shape={x.shape}")
 
         # MatMulFreeGLU
@@ -751,16 +759,11 @@ class MatMulFreeLanguageModel(nn.Module):
         # Weight Quantization using custom autograd Function
         W_bar = WeightQuantFunction.apply(self.output_layer.weight)
         logging.debug(f"W_bar passed to Logits: mean={x.mean().item():.4f}, std={x.std().item():.4f}, shape={x.shape}")
-
-
-        # MatMul-Free Linear Operation using custom autograd Function
-        output = x.view(-1, embed_size)  # [batch_size * seq_len, embed_size]
-        logging.debug(f"X passed to logits: mean={x.mean().item():.4f}, std={x.std().item():.4f}, shape={x.shape}")
+        output=x
 
         # Cross-node attention (global attention) - apply only if there is a previous node
         if prev_node_output is not None:
             output, attention_weights = self.cross_node_attention(output, prev_node_output, prev_node_output, attn_mask=src_mask)
-
             logging.debug(f"Shape of output: {output.shape}")
             logging.debug(f"Shape of attention_weights: {attention_weights.shape}")
 
@@ -775,13 +778,10 @@ class MatMulFreeLanguageModel(nn.Module):
         # Final token prediction layer in the final node
         if is_final_node:
             output = self.output_layer(output)
-        
-        x = output
-        logits = MatMulFreeLinearFunction.apply(x, W_bar.t()) + self.output_layer.bias
-        logging.debug(f"Logits passed to logits: mean={x.mean().item():.4f}, std={x.std().item():.4f}, shape={x.shape}")
 
-        logits = logits.view(batch_size, seq_len, -1)
-        logging.debug(f"2Logits passed to logits: mean={x.mean().item():.4f}, std={x.std().item():.4f}, shape={x.shape}")
+            
+        logits = output
+
 
         # Check for NaN or Inf in logits
         if torch.isnan(logits).any() or torch.isinf(logits).any():
@@ -1425,20 +1425,21 @@ class UnifiedTransformerGUI:
         target_ids = self.tokenizer.encode(target, truncation=True, max_length=1024)
 
         # Convert tokens to integers
-        query_ids = [int(token) for token in query_ids]
-        target_ids = [int(token) for token in target_ids]
+        query_ids = [min(max(int(token), 0), self.vocab_size - 1) for token in query_ids]
+
+        target_ids = [min(max(int(token), 0), self.vocab_size - 1) for token in target_ids]
 
         if training_mode == "imitation":
-            input_ids = query_ids + [self.tokenizer.eos_token_id] + target_ids
-            labels = query_ids + [self.tokenizer.eos_token_id] + target_ids
+            input_ids = query_ids + [self.tokenizer.eos_token_id] 
+            labels = query_ids + [self.tokenizer.eos_token_id] 
         elif training_mode == "completion":
             partial_length = len(query_ids) // 2
             partial_input = query_ids[:partial_length]
-            completion = query_ids[partial_length:] + [self.tokenizer.eos_token_id]
+            #completion = query_ids[partial_length:] + [self.tokenizer.eos_token_id]
 
             input_ids = partial_input + [self.tokenizer.eos_token_id]
-            # For completion, we want labels to represent the completed part only:
-            labels = completion  
+            # For completion, we want labels to represent the entire query, not just completion
+            labels = query_ids + [self.tokenizer.eos_token_id]  
         else:  # response
             input_ids = query_ids + [self.tokenizer.eos_token_id]
             labels = target_ids + [self.tokenizer.eos_token_id]
@@ -1623,54 +1624,105 @@ class UnifiedTransformerGUI:
                         batch_size=self.batch_size.get(),
                         shuffle=True,
                         num_workers=0,
-                        pin_memory=True,
+                        pin_memory=False,
                         collate_fn=collate_fn
                     )
             else:
                 max_length = 1024
                 # Convert lists of token IDs to tensors
-                input_ids = [
-                    torch.tensor(tokens + [self.tokenizer.pad_token_id] * (max_length - len(tokens)), dtype=torch.int64)[:max_length]
+                input_ids, seq_lengths = zip(*[
+                    (
+                        torch.tensor(tokens + [self.tokenizer.pad_token_id] * (max_length - len(tokens)), dtype=torch.int64, device=self.device)[:max_length],
+                        min(len(tokens), max_length)
+                    )
                     for tokens in self.input_ids
-                ]
+                ])
                 logging.info("input ids torched to tensor")
-                input_ids = torch.stack(input_ids)
-                logging.info("input ids stacked by torch")
-                attention_masks = (input_ids != self.tokenizer.pad_token_id).long()
+                labels = [
+                    torch.tensor(tokens + [self.tokenizer.pad_token_id] * (max_length - len(tokens)), dtype=torch.int64, device=self.device)[:max_length]
+                    for tokens in self.labels
+                ]
+                logging.info("labels torched to tensor")
+                attention_masks = [(ids != self.tokenizer.pad_token_id).long() for ids in input_ids]
                 logging.info("attention masks set for pad tokens")
 
-                assert isinstance(input_ids, list), "input_ids should be a list"
-                assert all(isinstance(id, int) for id in input_ids), "All input_ids should be integers"
-                assert len(input_ids) == self.max_length, "input_ids should be padded to max_length"
-                dataset = torch.utils.data.TensorDataset(input_ids, attention_masks)
-                dataloader = DataLoader(
-                        dataset,
-                        batch_size=int(self.batch_size.get()),
-                        shuffle=True,
-                        num_workers=0,  # Set to 0 to prevent multiple workers from loading chunks simultaneously
-                        pin_memory=True,
-                        collate_fn=collate_fn
-                    )
-                self.model.train()
-                sample_input, sample_attention_mask, sample_labels, sample_seq_length = next(iter(dataloader))
-                sample_input = sample_input.to(self.device)
-                sample_labels = sample_labels.to(self.device)
-                sample_seq_length = sample_seq_length.to(self.device)
-                try:
-                    logging.debug(f"Shape of batch_input_ids before generate_square_subsequent_mask: {sample_input.shape}")
 
-                    src_mask = generate_square_subsequent_mask(sample_input.size(1)).to(self.device)
+                input_ids = torch.stack(input_ids)
+                logging.info("input ids stacked by torch")
+
+                labels = torch.stack(labels)
+
+                attention_masks = torch.stack(attention_masks)
+
+                seq_lengths = torch.tensor(seq_lengths, dtype=torch.long, device=self.device)
+                logging.info("datas stacked and seq lengths torched")
+                # Perform assertions to validate tensors
+                assert isinstance(input_ids, torch.Tensor), "input_ids should be a tensor"
+                assert isinstance(labels, torch.Tensor), "labels should be a tensor"
+                assert input_ids.dtype == torch.long, "input_ids should be of type torch.long"
+                assert labels.dtype == torch.long, "labels should be of type torch.long"
+                assert input_ids.size(1) == max_length, "input_ids should be padded to max_length"
+                assert labels.size(1) == max_length, "labels should be padded to max_length"
+                dataset = torch.utils.data.TensorDataset(input_ids, attention_masks, labels, seq_lengths)
+                logging.info("dataset torched")
+                dataloader = DataLoader(
+                    dataset,
+                    batch_size=int(self.batch_size.get()),
+                    shuffle=True,
+                    num_workers=0,  # Set to 0 to prevent multiple workers from loading chunks simultaneously
+                    pin_memory=False,
+                )
+                logging.info("dataloader defined")
+            try:
+                    self.model.to(self.device)
+                    self.model.train()
+                    sample_input, sample_attention_mask, sample_labels, sample_seq_length = next(iter(dataloader))
+                    logging.info("sample data set for test training")
+
+                    sample_input = sample_input.to(self.device)
+                    logging.info("sample inputs sent to device")
+
+                    sample_labels = sample_labels.to(self.device)
+                    logging.info("sample labels sent to device")
+
+                    sample_seq_length = sample_seq_length.to(self.device)
+                    logging.info("sample seq length sent to device")
+
+                    batch_attention_masks=sample_attention_mask.to(self.device)
+                    logging.debug(f"Shape of batch_input_ids before generate_square_subsequent_mask: {sample_input.shape}")
+                    seq_lengths = sample_seq_length.to(self.device)
+                    logging.debug("Batch moved to device")
+                    # Prepare input and target sequences
+                    batch_target_ids = sample_labels
+                    logging.info("sample labels set to target ids")
+
+                    batch_input_ids = sample_input
+                    logging.info("sample inputs set to batch input ids")
+
+                    # Move batches and targets to the correct device
+                    batch_input_ids = batch_input_ids.to(self.device, dtype=torch.long)
+                    logging.info("sample input set to long")
+
+                    batch_attention_masks = batch_attention_masks.to(self.device)
+                    logging.info("sample attention masks sent to device")
+
+                    # Ensure input and target tensors are aligned for batch size
+                    if batch_input_ids.size(1) != batch_target_ids.size(1):
+                        raise ValueError("Input and target sequence lengths are mismatched.")
+                    # Generate src_mask                    
+                    logging.debug(f"Shape of batch_input_ids before generate_square_subsequent_mask: {batch_input_ids.shape}")
+                    src_mask = generate_square_subsequent_mask(batch_input_ids.size(1)).to(self.device)
 
                     # Log the shapes before combining
                     logging.debug(f"Shape of src_mask: {src_mask.shape}")
                     logging.debug(f"Shape of batch_attention_masks: {sample_attention_mask.shape}")
                     # Expand src_mask to match batch size and number of heads 
-                    src_mask = src_mask.unsqueeze(0).expand(sample_input.size(0), -1, -1) 
+                    src_mask = src_mask.unsqueeze(0).expand(batch_input_ids.size(0), -1, -1) 
                     logging.debug(f"Shape of src_mask after expansion: {src_mask.shape}")
                     # Combine masks without slicing (corrected)
-                    combined_mask = torch.logical_and(src_mask, sample_attention_mask[:, :-1].bool().unsqueeze(1))  # Slice batch_attention_masks
+                    combined_mask = torch.logical_and(src_mask, sample_attention_mask[:, :].bool().unsqueeze(1)).to(self.device)  # Slice batch_attention_masks
                     
-                    batch_size, seq_len = sample_input.size()
+                    batch_size, seq_len = batch_input_ids.size()
                     num_heads = self.model.num_heads 
                     combined_mask = combined_mask.unsqueeze(1)  # Shape (batch_size, 1, seq_len, seq_len)
                     combined_mask = combined_mask.expand(batch_size, num_heads, seq_len, seq_len)  # Shape (batch_size, num_heads, seq_len, seq_len)
@@ -1678,27 +1730,32 @@ class UnifiedTransformerGUI:
 
                     # Log the shape of the combined mask
                     logging.debug(f"Shape of combined_mask: {combined_mask.shape}")
-                    logging.debug(f"Shape of batch_input_ids being passed to model: {sample_attention_mask.shape}")
+                    logging.debug(f"Shape of batch_input_ids being passed to model: {batch_input_ids.shape}")
 
                     # Forward pass
     
-                    outputs, attention_weights = self.model(sample_input, mask=combined_mask.bool())
-                        
+                    outputs, attention_weights = self.model(batch_input_ids, seq_lengths, mask=combined_mask.bool())
+                    logging.debug(f"Shape of outputs after forward pass: {outputs.shape}")
+
                     if torch.isnan(outputs).any() or torch.isinf(outputs).any():
                                 logging.error("Model outputs contain NaN or Inf values.")
                                 raise ValueError("Model outputs contain NaN or Inf values.")
 
-                except Exception as e:
+            except Exception as e:
                         raise ValueError(f"forward pass failed for {str(e)}")
 
-                logging.debug(f"Shape of outputs: {outputs.shape}")
+            logging.debug(f"Shape of outputs: {outputs.shape}")
 
-                logits = outputs.view(-1, outputs.size(-1))
-                targets = sample_labels.view(-1)
-                loss = F.cross_entropy(logits, targets, ignore_index=self.tokenizer.pad_token_id)
-                
-                loss.backward()
-                print("Forward and backward pass successful. Loss:", loss.item())
+            logits_reshaped = outputs[:, :batch_target_ids.size(1), :].reshape(-1, outputs.size(-1))
+            targets_reshaped = batch_target_ids.reshape(-1)
+
+            loss = F.cross_entropy(
+                        logits_reshaped,
+                        targets_reshaped,
+                        ignore_index=self.tokenizer.pad_token_id
+            )
+            loss.backward()
+            print("Forward and backward pass successful. Loss:", loss.item())
         except Exception as e:
             print("Error during forward/backward pass:", e)
 
@@ -1724,7 +1781,7 @@ class UnifiedTransformerGUI:
                     batch_size=self.batch_size.get(),
                     shuffle=True,
                     num_workers=0,
-                    pin_memory=True,
+                    pin_memory=False,
                     collate_fn=collate_fn
                 )
             else:
@@ -1735,7 +1792,7 @@ class UnifiedTransformerGUI:
                 # Convert lists of token IDs to tensors and calculate original sequence lengths
                 input_ids, seq_lengths = zip(*[
                     (
-                        torch.tensor(tokens + [self.tokenizer.pad_token_id] * (max_length - len(tokens)), dtype=torch.int64)[:max_length],
+                        torch.tensor(tokens + [self.tokenizer.pad_token_id] * (max_length - len(tokens)), dtype=torch.int64, device=self.device)[:max_length],
                         min(len(tokens), max_length)
                     )
                     for tokens in self.input_ids
@@ -1743,7 +1800,7 @@ class UnifiedTransformerGUI:
                 logging.info("input ids torched to tensor")
 
                 labels = [
-                    torch.tensor(tokens + [self.tokenizer.pad_token_id] * (max_length - len(tokens)), dtype=torch.int64)[:max_length]
+                    torch.tensor(tokens + [self.tokenizer.pad_token_id] * (max_length - len(tokens)), dtype=torch.int64, device=self.device)[:max_length]
                     for tokens in self.labels
                 ]
                 logging.info("labels torched to tensor")
@@ -1775,7 +1832,7 @@ class UnifiedTransformerGUI:
                     batch_size=int(self.batch_size.get()),
                     shuffle=True,
                     num_workers=0,  # Set to 0 to prevent multiple workers from loading chunks simultaneously
-                    pin_memory=True,
+                    pin_memory=False,
                 )
                 logging.info("dataloader defined")
             ##chunked vs. standard else complete
@@ -1859,7 +1916,7 @@ class UnifiedTransformerGUI:
                     src_mask = src_mask.unsqueeze(0).expand(batch_input_ids.size(0), -1, -1) 
                     logging.debug(f"Shape of src_mask after expansion: {src_mask.shape}")
                     # Combine masks without slicing (corrected)
-                    combined_mask = torch.logical_and(src_mask, batch_attention_masks[:, :-1].bool().unsqueeze(1))  # Slice batch_attention_masks
+                    combined_mask = torch.logical_and(src_mask, batch_attention_masks[:, :].bool().unsqueeze(1))  # Slice batch_attention_masks
                     
                     batch_size, seq_len = batch_input_ids.size()
                     num_heads = self.model.num_heads 
@@ -1874,7 +1931,7 @@ class UnifiedTransformerGUI:
                     # Forward pass
                     try:
 
-                        outputs, attention_weights = self.model(batch_input_ids, mask=combined_mask.bool())
+                        outputs, attention_weights = self.model(batch_input_ids, seq_lengths, mask=combined_mask.bool())
                         if torch.isnan(outputs).any() or torch.isinf(outputs).any():
                                 logging.error("Model outputs contain NaN or Inf values.")
                                 raise ValueError("Model outputs contain NaN or Inf values.")
@@ -2055,13 +2112,16 @@ class UnifiedTransformerGUI:
         save_directory = filedialog.askdirectory(title="Select Save Directory")
         if save_directory:
             config = {
-                "vocab_size": len(self.tokenizer),
-                "embed_size": self.hidden_size.get(),
-                "hidden_size": self.hidden_size.get(),
-                "num_heads": self.num_heads.get(),
-                "num_layers": self.num_layers.get(),
-                "architecture": self.architecture.get()
-            }
+            "vocab_size": self.vocab_size.get(),
+            "embed_size": self.hidden_size.get(),
+            "hidden_size": self.hidden_size.get(),
+            "num_nodes": self.num_nodes.get(),
+            "num_heads": self.num_heads.get(),
+            "num_layers": self.num_layers.get(),
+            "architecture": self.architecture.get(),
+            "num_parameters": self.num_parameters.get(),
+            "layers": self.layers
+        }
             config_path = os.path.join(save_directory, 'model_config.json')
             with open(config_path, 'w') as f:
                 json.dump(config, f)

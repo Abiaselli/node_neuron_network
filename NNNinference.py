@@ -226,7 +226,7 @@ class MiniTransformerNode(nn.Module):
 
         # Final token prediction layer in the final node
         if is_final_node:
-            output = self.fc_out(output)
+            output = self.fc_out(output) + self.fc_out.bias
 
         return output, attention_weights
 
@@ -296,7 +296,7 @@ class MatMulFreeLanguageModel(nn.Module):
 
         # Final token prediction layer in the final node
         if is_final_node:
-            output = self.output_layer(output)
+            output = self.output_layer(output) + self.output_layer.bias
 
         logits = output
         return logits, attention_weights

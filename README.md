@@ -52,6 +52,8 @@ An inference program is included for testing. Note: if you edit the trainoing or
 
 I hope to add on to this and make incremental improvements over time. Also, this is not related to the NodeNet named in literature, so we will stick with Node Neuron Network or NNN, even though Nodenet is a better name.
 
+Update: Fixed the missing bias call for final output layer 
+
 Citations:
 
 @misc{zhu2024scalablematmulfreelanguagemodeling,
